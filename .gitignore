@@ -2,6 +2,9 @@
 .Rhistory
 .Rapp.history
 .DS_Store
+**/.DS_Store
+Icon\r
+Icon^M 
 
 # Session Data files
 .RData
@@ -41,6 +44,7 @@ vignettes/*.pdf
 
 # R Environment Variables
 .Renviron
+renv/library/
 
 # pkgdown site
 docs/
@@ -50,6 +54,8 @@ po/*~
 
 # RStudio Connect folder
 rsconnect/
-.Rproj.user
-.Rdata
-.quarto
+Icon?
+Thumbs.db
+*.swp
+*.swo
+desktop.ini
