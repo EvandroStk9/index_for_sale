@@ -1,7 +1,10 @@
 #!/bin/bash
+
 set -e
 
-JUNK_PATHS=(
+echo "🧹 Iniciando processo de limpeza do repositório Git com segurança..."
+
+junk_list=(
   ".DS_Store"
   "Icon?"
   "Thumbs.db"
@@ -9,110 +12,107 @@ JUNK_PATHS=(
   "*.swo"
 )
 
-echo "🧹 Limpando arquivos indesejados do diretório..."
-for pattern in "${JUNK_PATHS[@]}"; do
-  find . -name "$pattern" -exec rm -f {} + 2>/dev/null || true
+### Função auxiliar para backup completo
+backup_repo() {
+  backup_dir="../$(basename "$PWD")-backup-$(date +%Y%m%d-%H%M%S)"
+  echo "💾 Criando backup completo do repositório em: $backup_dir"
+  git clone --mirror . "$backup_dir"
+  echo "✅ Backup criado com sucesso."
+}
+
+### Verificação de HEAD válida
+verify_head() {
+  if ! git rev-parse --verify HEAD >/dev/null 2>&1; then
+    echo "❌ HEAD inválido. O repositório pode estar corrompido. Abortando..."
+    exit 1
+  fi
+}
+
+### Remoção de arquivos do sistema
+echo "🔍 Removendo arquivos indesejados do diretório..."
+for junk in "${junk_list[@]}"; do
+  find . -name "$junk" -exec rm -f {} + 2>/dev/null && echo "   → Removido: $junk"
 done
 echo "✅ Arquivos indesejados removidos."
 
-# Checa se estão no .gitignore
-if [[ -f .gitignore ]]; then
-  echo "🔍 Verificando se arquivos junk estão no .gitignore..."
-  for entry in "${JUNK_PATHS[@]}"; do
-    if ! grep -qxF "$entry" .gitignore; then
-      echo "⚠️ Atenção: '$entry' não está listado no .gitignore"
-    fi
-  done
+### Limpeza do index Git
+echo "📦 Limpando arquivos do index Git (se versionados)..."
+for junk in "${junk_list[@]}"; do
+  git rm --cached -r "$junk" 2>/dev/null || true
+done
+echo "✅ Index limpo."
+
+### Verifica mudanças para commit
+if [[ -n $(git status --porcelain) ]]; then
+  echo "📝 Mudanças detectadas:"
+  git status -s
+
+  read -p "Deseja realizar um commit dessas mudanças? (s/n): " do_commit
+  if [[ "$do_commit" == "s" ]]; then
+    read -p "Informe a mensagem do commit [default: 'chore: remove arquivos indesejados']: " commit_msg
+    commit_msg=${commit_msg:-"chore: remove arquivos indesejados"}
+    git commit -am "$commit_msg"
+    echo "✅ Commit realizado."
+  else
+    echo "⚠️  Mudanças não foram commitadas."
+  fi
 else
-  echo "⚠️ Nenhum .gitignore encontrado no diretório atual."
+  echo "📭 Nenhuma mudança para commit."
 fi
 
-# Limpa arquivos do index (sem apagar localmente)
-echo "📦 Limpando arquivos do index Git (se existirem)..."
-git rm -r --cached "${JUNK_PATHS[@]}" 2>/dev/null || true
+### Reescrever histórico
+read -p "Deseja reescrever o histórico com git-filter-repo para remoção completa de junk antigo? (s/n): " rewrite_history
+if [[ "$rewrite_history" == "s" ]]; then
+  backup_repo
 
-# Commit da limpeza
-echo "📌 Commit da limpeza..."
-git commit -am "chore: remove arquivos indesejados" || echo "Nada para commitar."
+  echo "🧼 Rodando git gc e fsck antes da reescrita..."
+  git gc --prune=now
+  git fsck --full
 
-# Limpeza básica de referências e objetos antes do rewrite
-echo "🧽 Rodando git gc e fsck antes da reescrita..."
-git reflog expire --expire=now --all
-git gc --aggressive --prune=now
-git fsck --full
+  echo "🚨 Isso irá reescrever TODO o histórico do Git."
+  read -p "Tem certeza que deseja continuar? (s/n): " confirm
+  if [[ "$confirm" == "s" ]]; then
+    echo "⚙️  Rodando git-filter-repo com segurança..."
+    git filter-repo \
+      --invert-paths \
+      $(for junk in "${junk_list[@]}"; do echo "--path-glob '$junk' "; done)
 
-# Confirmação
-echo "🚨 ATENÇÃO: Isso vai reescrever TODO o histórico do Git."
-read -p "Tem certeza que quer continuar? (s/n): " confirm
-[[ "$confirm" != "s" ]] && echo "❌ Cancelado." && exit 1
+    verify_head
 
-# Verifica git-filter-repo
-if ! command -v git-filter-repo &> /dev/null; then
-  echo "❌ git-filter-repo não encontrado. Instale com:"
-  echo "   brew install git-filter-repo  # (macOS)"
-  echo "   ou: https://github.com/newren/git-filter-repo"
-  exit 1
+    # Restaura remote origin
+    remote_url=$(git config --get remote.origin.url)
+    if [[ -n "$remote_url" ]]; then
+      git remote add origin "$remote_url" 2>/dev/null || true
+      echo "🔄 Remote origin restaurado: $remote_url"
+    fi
+
+    echo "✅ Histórico reescrito com sucesso."
+  else
+    echo "❌ Reescrita do histórico cancelada."
+  fi
+else
+  echo "⏭️  Reescrita do histórico ignorada."
 fi
 
-# Salva remote
-origin_url=$(git remote get-url origin 2>/dev/null || true)
-
-# Lista branches remotas
-branches_remotas=$(git branch -r | grep -v 'HEAD' | sed 's|origin/||' | sort -u)
-
-# Remove referências problemáticas relacionadas a 'Icon' (com qualquer byte suspeito)
-echo "🧼 Procurando e removendo referências relacionadas a 'Icon' (inclusive com caracteres invisíveis)..."
-find .git/refs -type f | while IFS= read -r ref; do
-  if hexdump -C "$ref" | grep -iq 'Icon'; then
-    echo "   → Deletando referência suspeita: $ref"
-    rm -f "$ref"
+### Verifica se os arquivos estão no .gitignore
+echo "🧾 Verificando se os arquivos junk estão no .gitignore..."
+for junk in "${junk_list[@]}"; do
+  if ! grep -qxF "$junk" .gitignore 2>/dev/null; then
+    echo "⚠️  Atenção: '$junk' não está listado no .gitignore"
   fi
 done
 
-find .git/logs/refs -type f | while IFS= read -r logref; do
-  if hexdump -C "$logref" | grep -iq 'Icon'; then
-    echo "   → Deletando log de referência suspeita: $logref"
-    rm -f "$logref"
-  fi
-done
-
-git remote prune origin || true
-
-# Reescreve o histórico com git-filter-repo
-echo "🧨 Reescrevendo histórico com git-filter-repo..."
-for path in "${JUNK_PATHS[@]}"; do
-  args+=(--path "$path")
-done
-
-git filter-repo --force --invert-paths "${args[@]}"
-
-# Restaura origin se removido
-if ! git remote get-url origin &> /dev/null && [[ -n "$origin_url" ]]; then
-  echo "🔁 Restaurando remote origin: $origin_url"
-  git remote add origin "$origin_url"
+### Push final
+read -p "Deseja enviar as mudanças para o repositório remoto com 'git push --force-with-lease'? (s/n): " do_push
+if [[ "$do_push" == "s" ]]; then
+  current_branch=$(git rev-parse --abbrev-ref HEAD)
+  echo "📤 Enviando mudanças com sobrescrita segura..."
+  git push --force-with-lease origin "$current_branch" || {
+    echo "⚠️  Push falhou. Tentando configurar upstream..."
+    git push --set-upstream origin "$current_branch"
+  }
+else
+  echo "🚫 Push cancelado."
 fi
 
-# Limpa arquivos não rastreados
-echo "🧹 Limpando arquivos não rastreados..."
-git clean -xfd
-
-# Push forçado
-echo "📤 Fazendo push forçado das branches locais..."
-for branch in $(git for-each-ref --format='%(refname:short)' refs/heads/); do
-  git push origin --force "$branch"
-done
-
-# Remove branches remotas órfãs
-echo "🧨 Deletando branches remotas órfãs..."
-for remote_branch in $branches_remotas; do
-  if ! git show-ref --verify --quiet "refs/heads/$remote_branch"; then
-    echo "   → Deletando do remoto: $remote_branch"
-    git push origin --delete "$remote_branch" || true
-  fi
-done
-
-# Push de tags
-echo "🏷️ Fazendo push forçado das tags..."
-git push origin --force --tags
-
-echo "✅ Limpeza completa! Histórico e repositório atualizados com sucesso."
+echo "🎉 Processo concluído com segurança. Repositório limpo e íntegro!"
